@@ -24,7 +24,11 @@ Boston, MA  02111-1307, USA.
 package project;
 
 import java.util.HashMap;
+import java.util.Iterator;
+import java.util.LinkedList;
 import java.util.Map;
+import java.util.Set;
+import java.util.TreeSet;
 
 import jade.core.AID;
 import jade.core.Agent;
@@ -52,10 +56,11 @@ public class NodeAgent extends Agent {
 	public final static float MIN_BATTERY_LVL = 0.3F;
 	public final static float MIN_ACCURACY_LVL = 0;
 	private static final String GEO_ROLE_FV = "GEO_ROLE_FV";
-	public final static int GEO_ROLE_K = 3;
+	public final static int GEO_ROLE_K = 2;
 	private GeolocationFitness geolocationFitness;
 	
-	private Map<String, Map<String, Float>> fitnessTable;
+	private Map<String, Set<GeolocationFitness>> fitnessTable;
+	private Map<String, LinkedList<String>> assignmentTable;
 	private boolean updatedFitnessValues = false;
 		
 	protected void setup() {
@@ -83,35 +88,56 @@ public class NodeAgent extends Agent {
 	}
 	
 	private void setupFitnessTable() {
-		fitnessTable = new HashMap<String, Map<String, Float>>();
-		geolocationFitness = new GeolocationFitness();
-		float geoRoleFV = geolocationFitness.fitnessValue(
+		fitnessTable = new HashMap<String, Set<GeolocationFitness>>();
+		assignmentTable = new HashMap<String, LinkedList<String>>();
+		assignmentTable.put(GEO_ROLE_FV, new LinkedList<>());
+				
+		float geoRoleFV = GeolocationFitness.fitnessValue(
 			RandomContexGenerator.batteryLevel(MIN_BATTERY_LVL), 
 			RandomContexGenerator.sensorAccuracyLevel(MIN_ACCURACY_LVL)
 		);		
-		Map<String, Float> fitnessValues = new HashMap<String, Float>();
-		fitnessValues.put(getAID().getName(), geoRoleFV);
-		fitnessTable.put(GEO_ROLE_FV, fitnessValues);
+		Set<GeolocationFitness> fitnessValues = new TreeSet<GeolocationFitness>();
+		fitnessValues.add(new GeolocationFitness(getAID().getName(), geoRoleFV));
+		fitnessTable.put(GEO_ROLE_FV, fitnessValues);		
 		System.out.println(geoRoleFV);
 	}
 	
 	private void addBehaviors() {
 		// Checks for other agents
-		addBehaviour(new Discovery(this, 10 * 1000));
+		addBehaviour(new Discovery(this, 60 * 1000));
 		// Receive from other agents their fitness values
 		addBehaviour(new ReceiveFitness());
 		// Inform other agents about my fitness values
-		addBehaviour(new InformFitness(this, 30 * 1000));
+		addBehaviour(new InformFitness(this, 10 * 1000));
 		// Reassign roles according to the fitness values
-		addBehaviour(new ReassignRoles(this, 30 * 1000));
+		addBehaviour(new ReassignRoles(this, 10 * 1000));
 	}
 	
 	protected void takeDown() {
 		System.out.println("Node-agent "+getAID().getName()+" terminating.");
 	}
 	
-	protected void assumeRole(String role){
-		System.out.println("Node-agent "+getAID().getName()+" assuming the " + role + " role");
+	protected void assumeRole(String role, int p){		
+		System.out.println("Node-agent "+getAID().getName()+" assumed role " + role);
+	}
+	
+	protected void dropRole(String role){
+		System.out.println("Node-agent "+getAID().getName()+" droped role " + role);
+	}
+	
+	protected void currentAssignments(){
+		for(String roleName : assignmentTable.keySet()){
+			System.out.println("Role " + roleName + " assigned to:");
+			for(String agentName : assignmentTable.get(roleName))
+				System.out.println(agentName);
+		}
+	}
+	
+	private float getFitnessValue(String agentName, String roleName) {
+		for(GeolocationFitness geolocationFitness : fitnessTable.get(roleName))
+			if(geolocationFitness.getAgentName().equals(agentName))
+				return geolocationFitness.getFitnessValue();
+		return 0;//TODO
 	}
 	
 	private class Discovery extends TickerBehaviour {
@@ -147,12 +173,13 @@ public class NodeAgent extends Agent {
 		public void action() {			
 			MessageTemplate mt = MessageTemplate.MatchPerformative(ACLMessage.INFORM);
 			ACLMessage msg = myAgent.receive(mt);
-			if (msg != null &&
-				!msg.getSender().getName().equals(myAgent.getName())) {
+			if (msg != null) {
 				if(msg.getContent() != null){
 					String senderName = msg.getSender().getName();
-					float fitnessValue = Float.parseFloat(msg.getContent());					
-					fitnessTable.get(GEO_ROLE_FV).put(senderName, fitnessValue);
+					float fitnessValue = Float.parseFloat(msg.getContent());
+					GeolocationFitness geolocationFitness = new GeolocationFitness(senderName, fitnessValue);
+					fitnessTable.get(GEO_ROLE_FV).remove(geolocationFitness);
+					fitnessTable.get(GEO_ROLE_FV).add(geolocationFitness);
 					updatedFitnessValues = true;
 					System.out.println(getAID().getName() + ": Fitness value for agent " + senderName + " updated with value " + fitnessValue);
 				}
@@ -172,18 +199,25 @@ public class NodeAgent extends Agent {
 		protected void onTick() {
 			if(updatedFitnessValues){
 				updatedFitnessValues = false;
-				System.out.println("Checking for reassignment after fitness value update");
-				float agentNodeFV = fitnessTable.get(GEO_ROLE_FV).get(getAID().getName());
-				for(String roleName : fitnessTable.keySet())
-					for(String agentName : fitnessTable.get(roleName).keySet())
-						if(!agentName.equals(getAID().getName())){
-							float otherAgentNodeFV = fitnessTable.get(roleName).get(agentName);
-							if(otherAgentNodeFV > agentNodeFV)
-								return;
-						}
+				System.out.println("Checking for reassignment after fitness value update");																									
 				
-				NodeAgent.this.assumeRole(GEO_ROLE_FV);
+				boolean assume = false;
+				for(String roleName : fitnessTable.keySet()){	
+					assignmentTable.get(roleName).clear();
+					Iterator <GeolocationFitness> it = fitnessTable.get(roleName).iterator();
+					for(int i = 0; it.hasNext() && i < GEO_ROLE_K; i++){
+						GeolocationFitness geolocationFitness = it.next();
+						assignmentTable.get(roleName).add(i, geolocationFitness.getAgentName());	
+						if(geolocationFitness.getAgentName().equals(getAID().getName())){
+							assume = true;
+							assumeRole(roleName, i + 1);
+						}
+					}
+					if(!assume)
+						dropRole(roleName);
+				}													
 			}
+			currentAssignments();
 		}
 	} 
 	
@@ -194,28 +228,26 @@ public class NodeAgent extends Agent {
 		}
 		
 		public void onTick() {
-			float geoRoleFV = geolocationFitness.fitnessValue(
+			float geoRoleFV = GeolocationFitness.fitnessValue(
 				RandomContexGenerator.batteryLevel(MIN_BATTERY_LVL), 
 				RandomContexGenerator.sensorAccuracyLevel(MIN_ACCURACY_LVL)
 			);			
-			float oldRoleFV = fitnessTable.get(GEO_ROLE_FV).get(getAID().getName());
-			if(geoRoleFV != oldRoleFV){
-				fitnessTable.get(GEO_ROLE_FV).put(getAID().getName(), geoRoleFV);
-				informFitness(getAgent());
-			}
+			float oldRoleFV = 0;
+			oldRoleFV = getFitnessValue(getAID().getName(), GEO_ROLE_FV);
+			if(geoRoleFV != oldRoleFV)				
+				informFitness(getAgent(), geoRoleFV);			
 		}
 		
-		private void informFitness(Agent myAgent){
+		private void informFitness(Agent myAgent, float newRoleFV){
 			ACLMessage cfp = new ACLMessage(ACLMessage.INFORM);
 			for (int i = 0; i < nodeAgents.length; ++i) {
 				cfp.addReceiver(nodeAgents[i]);
-			} 
-			String fitnessValue = fitnessTable.get(GEO_ROLE_FV).get(getAID().getName())+ "";
-			cfp.setContent(fitnessValue);
+			} 			
+			cfp.setContent(newRoleFV + "");
 			cfp.setConversationId("geo-role-fv");
 			cfp.setReplyWith("cfp"+System.currentTimeMillis()); // Unique value
 			myAgent.send(cfp);	
-			System.out.println(getAID().getName() + ": Fitness value informed with value " + fitnessValue);
+			System.out.println(getAID().getName() + ": Fitness value informed with value " + newRoleFV);
 		}
 	}
 }
