@@ -10,4 +10,13 @@ public class GeolocationFitness extends Fitness{
 		float fv = batteryLevel * sensorAccuracy;
 		return fv;
 	}
+	
+	@Override
+	public boolean equals(Object obj) {		
+		if(obj instanceof GeolocationFitness){
+			GeolocationFitness toCompare = (GeolocationFitness) obj;
+			return getAgentName().equals(toCompare.getAgentName());
+		}
+		return false;
+	}
 }

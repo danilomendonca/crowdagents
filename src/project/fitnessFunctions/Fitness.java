@@ -38,13 +38,4 @@ public class Fitness implements Comparable<Fitness>{
 		return getAgentName().hashCode();
 	}
 	
-	@Override
-	public boolean equals(Object obj) {		
-		if(obj instanceof CampaignFitness){
-			CampaignFitness toCompare = (CampaignFitness) obj;
-			return getAgentName().equals(toCompare.getAgentName());
-		}
-		return false;
-	}
-
 }

@@ -31,17 +31,19 @@ import java.util.concurrent.CopyOnWriteArraySet;
 
 import jade.core.AID;
 import jade.core.Agent;
+import jade.core.behaviours.Behaviour;
 import jade.core.behaviours.TickerBehaviour;
 import jade.domain.DFService;
 import jade.domain.FIPAException;
 import jade.domain.FIPAAgentManagement.DFAgentDescription;
 import jade.domain.FIPAAgentManagement.ServiceDescription;
+import jade.lang.acl.ACLMessage;
 
 public class CampaignAgent extends Agent {
 	/**
 	 * 
 	 */
-	private static final long serialVersionUID = 1459331970706327956L;
+	private static final long serialVersionUID = -6094778978588662214L;
 
 	// The set of known seller agents
 	private Set <AID> nodeAgents = new CopyOnWriteArraySet<AID>();
@@ -54,7 +56,7 @@ public class CampaignAgent extends Agent {
 	protected void setup() {
 		System.out.println("Hallo! Campaign-agent "+getAID().getName()+" is ready.");
 		
-		registerAgent();		
+		//registerAgent();		
 		addBehaviors();
 	}
 
@@ -91,6 +93,8 @@ public class CampaignAgent extends Agent {
 		}
 	}
 	
+	public static final int GEO_ROLE_CD = 2;
+	
 	private class Discovery extends TickerBehaviour {
 		
 		public Discovery(Agent agent, long period){
@@ -98,7 +102,6 @@ public class CampaignAgent extends Agent {
 		}
 		
 		protected void onTick() {
-			System.out.println("Checking for other node agents");
 			// Update the list of seller agents
 			DFAgentDescription template = new DFAgentDescription();
 			ServiceDescription sd = new ServiceDescription();
@@ -106,15 +109,28 @@ public class CampaignAgent extends Agent {
 			template.addServices(sd);
 			try {
 				DFAgentDescription[] result = DFService.search(myAgent, template);
-				System.out.println("Found the following node agents:");
+				//System.out.println("Found the following node agents:");
 				for (int i = 0; i < result.length; ++i) {
-					System.out.println(result[i].getName().getName());
+					//System.out.println(result[i].getName().getName());
 					nodeAgents.add(result[i].getName());
 				}
+				informCardinality(GEO_ROLE_CD);
 			}
 			catch (FIPAException fe) {
 				fe.printStackTrace();
 			}
+		}
+		
+		private void informCardinality(int cardinality){
+			ACLMessage cfp = new ACLMessage(ACLMessage.INFORM);
+			for (AID agent : nodeAgents) {
+				cfp.addReceiver(agent);
+			} 			
+			cfp.setContent(cardinality + "");
+			cfp.setConversationId("geo-role-cd");
+			cfp.setReplyWith("cfp"+System.currentTimeMillis()); // Unique value
+			myAgent.send(cfp);	
+			//System.out.println(getAID().getName() + ": Campaign fitness value informed with value " + newRoleFV);
 		}
 	} 
 }
