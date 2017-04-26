@@ -23,175 +23,199 @@ Boston, MA  02111-1307, USA.
 
 package project;
 
-import jade.core.Agent;
+import java.util.HashMap;
+import java.util.Map;
+
 import jade.core.AID;
-import jade.core.behaviours.*;
-import jade.lang.acl.ACLMessage;
-import jade.lang.acl.MessageTemplate;
+import jade.core.Agent;
+import jade.core.behaviours.CyclicBehaviour;
+import jade.core.behaviours.TickerBehaviour;
 import jade.domain.DFService;
 import jade.domain.FIPAException;
 import jade.domain.FIPAAgentManagement.DFAgentDescription;
 import jade.domain.FIPAAgentManagement.ServiceDescription;
+import jade.lang.acl.ACLMessage;
+import jade.lang.acl.MessageTemplate;
+import project.fitnessFunctions.GeolocationFitness;
+import project.setup.RandomContexGenerator;
 
 public class NodeAgent extends Agent {
-	// The title of the book to buy
-	private String targetBookTitle;
+	
+	/**
+	 * 
+	 */
+	private static final long serialVersionUID = -238427612196093820L;
+
 	// The list of known seller agents
-	private AID[] sellerAgents;
-
-	// Put agent initializations here
+	private AID[] nodeAgents;
+		
+	public final static float MIN_BATTERY_LVL = 0.3F;
+	public final static float MIN_ACCURACY_LVL = 0;
+	private static final String GEO_ROLE_FV = "GEO_ROLE_FV";
+	public final static int GEO_ROLE_K = 3;
+	private GeolocationFitness geolocationFitness;
+	
+	private Map<String, Map<String, Float>> fitnessTable;
+	private boolean updatedFitnessValues = false;
+		
 	protected void setup() {
-		// Printout a welcome message
 		System.out.println("Hallo! Node-agent "+getAID().getName()+" is ready.");
-
-		// Get the title of the book to buy as a start-up argument
-		Object[] args = getArguments();
-		if (args != null && args.length > 0) {
-			targetBookTitle = (String) args[0];
-			System.out.println("Target book is "+targetBookTitle);
-
-			// Add a TickerBehaviour that schedules a request to seller agents every minute
-			addBehaviour(new Ticker(this, 60000));
-		}
-		else {
-			// Make the agent terminate
-			System.out.println("No target book title specified");
-			doDelete();
-		}
+		
+		registerAgent();		
+		setupFitnessTable();	
+		addBehaviors();
 	}
 
-	// Put agent clean-up operations here
-	protected void takeDown() {
-		// Printout a dismissal message
-		System.out.println("Buyer-agent "+getAID().getName()+" terminating.");
+	private void registerAgent() {
+		// Register the book-selling service in the yellow pages
+		DFAgentDescription dfd = new DFAgentDescription();
+		dfd.setName(getAID());
+		ServiceDescription sd = new ServiceDescription();
+		sd.setType("node-agent");
+		sd.setName("Role-fitness-agent");
+		dfd.addServices(sd);
+		try {
+			DFService.register(this, dfd);
+		}
+		catch (FIPAException fe) {
+			fe.printStackTrace();
+		}
 	}
 	
-	private class Ticker extends TickerBehaviour {
+	private void setupFitnessTable() {
+		fitnessTable = new HashMap<String, Map<String, Float>>();
+		geolocationFitness = new GeolocationFitness();
+		float geoRoleFV = geolocationFitness.fitnessValue(
+			RandomContexGenerator.batteryLevel(MIN_BATTERY_LVL), 
+			RandomContexGenerator.sensorAccuracyLevel(MIN_ACCURACY_LVL)
+		);		
+		Map<String, Float> fitnessValues = new HashMap<String, Float>();
+		fitnessValues.put(getAID().getName(), geoRoleFV);
+		fitnessTable.put(GEO_ROLE_FV, fitnessValues);
+		System.out.println(geoRoleFV);
+	}
+	
+	private void addBehaviors() {
+		// Checks for other agents
+		addBehaviour(new Discovery(this, 10 * 1000));
+		// Receive from other agents their fitness values
+		addBehaviour(new ReceiveFitness());
+		// Inform other agents about my fitness values
+		addBehaviour(new InformFitness(this, 30 * 1000));
+		// Reassign roles according to the fitness values
+		addBehaviour(new ReassignRoles(this, 30 * 1000));
+	}
+	
+	protected void takeDown() {
+		System.out.println("Node-agent "+getAID().getName()+" terminating.");
+	}
+	
+	protected void assumeRole(String role){
+		System.out.println("Node-agent "+getAID().getName()+" assuming the " + role + " role");
+	}
+	
+	private class Discovery extends TickerBehaviour {
 		
-		public Ticker(Agent agent, long period){
+		public Discovery(Agent agent, long period){
 			super(agent, period);
 		}
 		
 		protected void onTick() {
-			System.out.println("Trying to buy "+targetBookTitle);
+			System.out.println("Checking for other node agents");
 			// Update the list of seller agents
 			DFAgentDescription template = new DFAgentDescription();
 			ServiceDescription sd = new ServiceDescription();
-			sd.setType("book-selling");
+			sd.setType("node-agent");
 			template.addServices(sd);
 			try {
-				DFAgentDescription[] result = DFService.search(myAgent, template); 
-				System.out.println("Found the following seller agents:");
-				sellerAgents = new AID[result.length];
+				DFAgentDescription[] result = DFService.search(myAgent, template);
+				System.out.println("Found the following node agents:");
+				nodeAgents = new AID[result.length];
 				for (int i = 0; i < result.length; ++i) {
-					sellerAgents[i] = result[i].getName();
-					System.out.println(sellerAgents[i].getName());
+					nodeAgents[i] = result[i].getName();
+					System.out.println(nodeAgents[i].getName());
 				}
 			}
 			catch (FIPAException fe) {
 				fe.printStackTrace();
 			}
-
-			// Perform the request
-			myAgent.addBehaviour(new RequestPerformer());
 		}
 	} 
-
-	/**
-	   Inner class RequestPerformer.
-	   This is the behaviour used by Book-buyer agents to request seller 
-	   agents the target book.
-	 */
-	private class RequestPerformer extends Behaviour {
-		private AID bestSeller; // The agent who provides the best offer 
-		private int bestPrice;  // The best offered price
-		private int repliesCnt = 0; // The counter of replies from seller agents
-		private MessageTemplate mt; // The template to receive replies
-		private int step = 0;
-
-		public void action() {
-			switch (step) {
-			case 0:
-				// Send the cfp to all sellers
-				ACLMessage cfp = new ACLMessage(ACLMessage.CFP);
-				for (int i = 0; i < sellerAgents.length; ++i) {
-					cfp.addReceiver(sellerAgents[i]);
-				} 
-				cfp.setContent(targetBookTitle);
-				cfp.setConversationId("book-trade");
-				cfp.setReplyWith("cfp"+System.currentTimeMillis()); // Unique value
-				myAgent.send(cfp);
-				// Prepare the template to get proposals
-				mt = MessageTemplate.and(MessageTemplate.MatchConversationId("book-trade"),
-						MessageTemplate.MatchInReplyTo(cfp.getReplyWith()));
-				step = 1;
-				break;
-			case 1:
-				// Receive all proposals/refusals from seller agents
-				ACLMessage reply = myAgent.receive(mt);
-				if (reply != null) {
-					// Reply received
-					if (reply.getPerformative() == ACLMessage.PROPOSE) {
-						// This is an offer 
-						int price = Integer.parseInt(reply.getContent());
-						if (bestSeller == null || price < bestPrice) {
-							// This is the best offer at present
-							bestPrice = price;
-							bestSeller = reply.getSender();
-						}
-					}
-					repliesCnt++;
-					if (repliesCnt >= sellerAgents.length) {
-						// We received all replies
-						step = 2; 
-					}
+	
+	private class ReceiveFitness extends CyclicBehaviour {
+		
+		public void action() {			
+			MessageTemplate mt = MessageTemplate.MatchPerformative(ACLMessage.INFORM);
+			ACLMessage msg = myAgent.receive(mt);
+			if (msg != null &&
+				!msg.getSender().getName().equals(myAgent.getName())) {
+				if(msg.getContent() != null){
+					String senderName = msg.getSender().getName();
+					float fitnessValue = Float.parseFloat(msg.getContent());					
+					fitnessTable.get(GEO_ROLE_FV).put(senderName, fitnessValue);
+					updatedFitnessValues = true;
+					System.out.println(getAID().getName() + ": Fitness value for agent " + senderName + " updated with value " + fitnessValue);
 				}
-				else {
-					block();
-				}
-				break;
-			case 2:
-				// Send the purchase order to the seller that provided the best offer
-				ACLMessage order = new ACLMessage(ACLMessage.ACCEPT_PROPOSAL);
-				order.addReceiver(bestSeller);
-				order.setContent(targetBookTitle);
-				order.setConversationId("book-trade");
-				order.setReplyWith("order"+System.currentTimeMillis());
-				myAgent.send(order);
-				// Prepare the template to get the purchase order reply
-				mt = MessageTemplate.and(MessageTemplate.MatchConversationId("book-trade"),
-						MessageTemplate.MatchInReplyTo(order.getReplyWith()));
-				step = 3;
-				break;
-			case 3:      
-				// Receive the purchase order reply
-				reply = myAgent.receive(mt);
-				if (reply != null) {
-					// Purchase order reply received
-					if (reply.getPerformative() == ACLMessage.INFORM) {
-						// Purchase successful. We can terminate
-						System.out.println(targetBookTitle+" successfully purchased from agent "+reply.getSender().getName());
-						System.out.println("Price = "+bestPrice);
-						myAgent.doDelete();
-					}
-					else {
-						System.out.println("Attempt failed: requested book already sold.");
-					}
-
-					step = 4;
-				}
-				else {
-					block();
-				}
-				break;
-			}        
-		}
-
-		public boolean done() {
-			if (step == 2 && bestSeller == null) {
-				System.out.println("Attempt failed: "+targetBookTitle+" not available for sale");
 			}
-			return ((step == 2 && bestSeller == null) || step == 4);
+			else {
+				block();
+			}
 		}
-	}  // End of inner class RequestPerformer
+	}
+	
+	private class ReassignRoles extends TickerBehaviour {
+		
+		public ReassignRoles(Agent agent, long period){
+			super(agent, period);
+		}
+		
+		protected void onTick() {
+			if(updatedFitnessValues){
+				updatedFitnessValues = false;
+				System.out.println("Checking for reassignment after fitness value update");
+				float agentNodeFV = fitnessTable.get(GEO_ROLE_FV).get(getAID().getName());
+				for(String roleName : fitnessTable.keySet())
+					for(String agentName : fitnessTable.get(roleName).keySet())
+						if(!agentName.equals(getAID().getName())){
+							float otherAgentNodeFV = fitnessTable.get(roleName).get(agentName);
+							if(otherAgentNodeFV > agentNodeFV)
+								return;
+						}
+				
+				NodeAgent.this.assumeRole(GEO_ROLE_FV);
+			}
+		}
+	} 
+	
+	private class InformFitness extends TickerBehaviour {
+		
+		public InformFitness(Agent agent, long period){
+			super(agent, period);
+		}
+		
+		public void onTick() {
+			float geoRoleFV = geolocationFitness.fitnessValue(
+				RandomContexGenerator.batteryLevel(MIN_BATTERY_LVL), 
+				RandomContexGenerator.sensorAccuracyLevel(MIN_ACCURACY_LVL)
+			);			
+			float oldRoleFV = fitnessTable.get(GEO_ROLE_FV).get(getAID().getName());
+			if(geoRoleFV != oldRoleFV){
+				fitnessTable.get(GEO_ROLE_FV).put(getAID().getName(), geoRoleFV);
+				informFitness(getAgent());
+			}
+		}
+		
+		private void informFitness(Agent myAgent){
+			ACLMessage cfp = new ACLMessage(ACLMessage.INFORM);
+			for (int i = 0; i < nodeAgents.length; ++i) {
+				cfp.addReceiver(nodeAgents[i]);
+			} 
+			String fitnessValue = fitnessTable.get(GEO_ROLE_FV).get(getAID().getName())+ "";
+			cfp.setContent(fitnessValue);
+			cfp.setConversationId("geo-role-fv");
+			cfp.setReplyWith("cfp"+System.currentTimeMillis()); // Unique value
+			myAgent.send(cfp);	
+			System.out.println(getAID().getName() + ": Fitness value informed with value " + fitnessValue);
+		}
+	}
 }
