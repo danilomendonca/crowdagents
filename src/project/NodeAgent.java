@@ -23,12 +23,13 @@ Boston, MA  02111-1307, USA.
 
 package project;
 
-import java.util.HashMap;
 import java.util.Iterator;
 import java.util.LinkedList;
 import java.util.Map;
 import java.util.Set;
 import java.util.TreeSet;
+import java.util.concurrent.ConcurrentHashMap;
+import java.util.concurrent.CopyOnWriteArraySet;
 
 import jade.core.AID;
 import jade.core.Agent;
@@ -50,18 +51,19 @@ public class NodeAgent extends Agent {
 	 */
 	private static final long serialVersionUID = -238427612196093820L;
 
-	// The list of known seller agents
-	private AID[] nodeAgents;
+	// The set of known seller agents
+	private Set <AID> nodeAgents = new CopyOnWriteArraySet<AID>();
 		
 	public final static float MIN_BATTERY_LVL = 0.3F;
 	public final static float MIN_ACCURACY_LVL = 0;
 	private static final String GEO_ROLE_FV = "GEO_ROLE_FV";
 	public final static int GEO_ROLE_K = 2;
-	private GeolocationFitness geolocationFitness;
 	
-	private Map<String, Set<GeolocationFitness>> fitnessTable;
-	private Map<String, LinkedList<String>> assignmentTable;
+	private Map<String, Set<GeolocationFitness>> fitnessTable = new ConcurrentHashMap<String, Set<GeolocationFitness>>();
+	private Map<String, LinkedList<String>> assignmentTable = new ConcurrentHashMap<String, LinkedList<String>>();
 	private boolean updatedFitnessValues = false;
+	
+	private float batteryLevel = RandomContexGenerator.batteryLevel(MIN_BATTERY_LVL);
 		
 	protected void setup() {
 		System.out.println("Hallo! Node-agent "+getAID().getName()+" is ready.");
@@ -88,12 +90,10 @@ public class NodeAgent extends Agent {
 	}
 	
 	private void setupFitnessTable() {
-		fitnessTable = new HashMap<String, Set<GeolocationFitness>>();
-		assignmentTable = new HashMap<String, LinkedList<String>>();
 		assignmentTable.put(GEO_ROLE_FV, new LinkedList<>());
 				
 		float geoRoleFV = GeolocationFitness.fitnessValue(
-			RandomContexGenerator.batteryLevel(MIN_BATTERY_LVL), 
+			batteryLevel, 
 			RandomContexGenerator.sensorAccuracyLevel(MIN_ACCURACY_LVL)
 		);		
 		Set<GeolocationFitness> fitnessValues = new TreeSet<GeolocationFitness>();
@@ -104,7 +104,7 @@ public class NodeAgent extends Agent {
 	
 	private void addBehaviors() {
 		// Checks for other agents
-		addBehaviour(new Discovery(this, 60 * 1000));
+		addBehaviour(new Discovery(this, 10 * 1000));
 		// Receive from other agents their fitness values
 		addBehaviour(new ReceiveFitness());
 		// Inform other agents about my fitness values
@@ -140,6 +140,17 @@ public class NodeAgent extends Agent {
 		return 0;//TODO
 	}
 	
+	private class GPSBehavior extends TickerBehaviour {
+		
+		public GPSBehavior(Agent agent, long period){
+			super(agent, period);
+		}
+		
+		protected void onTick() {
+			batteryLevel = batteryLevel * 0.99F;
+		}
+	}
+	
 	private class Discovery extends TickerBehaviour {
 		
 		public Discovery(Agent agent, long period){
@@ -156,10 +167,9 @@ public class NodeAgent extends Agent {
 			try {
 				DFAgentDescription[] result = DFService.search(myAgent, template);
 				System.out.println("Found the following node agents:");
-				nodeAgents = new AID[result.length];
 				for (int i = 0; i < result.length; ++i) {
-					nodeAgents[i] = result[i].getName();
-					System.out.println(nodeAgents[i].getName());
+					System.out.println(result[i].getName().getName());
+					nodeAgents.add(result[i].getName());
 				}
 			}
 			catch (FIPAException fe) {
@@ -181,7 +191,7 @@ public class NodeAgent extends Agent {
 					fitnessTable.get(GEO_ROLE_FV).remove(geolocationFitness);
 					fitnessTable.get(GEO_ROLE_FV).add(geolocationFitness);
 					updatedFitnessValues = true;
-					System.out.println(getAID().getName() + ": Fitness value for agent " + senderName + " updated with value " + fitnessValue);
+					//System.out.println(getAID().getName() + ": Fitness value for agent " + senderName + " updated with value " + fitnessValue);
 				}
 			}
 			else {
@@ -216,8 +226,8 @@ public class NodeAgent extends Agent {
 					if(!assume)
 						dropRole(roleName);
 				}													
+				currentAssignments();
 			}
-			currentAssignments();
 		}
 	} 
 	
@@ -229,7 +239,7 @@ public class NodeAgent extends Agent {
 		
 		public void onTick() {
 			float geoRoleFV = GeolocationFitness.fitnessValue(
-				RandomContexGenerator.batteryLevel(MIN_BATTERY_LVL), 
+				batteryLevel, 
 				RandomContexGenerator.sensorAccuracyLevel(MIN_ACCURACY_LVL)
 			);			
 			float oldRoleFV = 0;
@@ -240,8 +250,8 @@ public class NodeAgent extends Agent {
 		
 		private void informFitness(Agent myAgent, float newRoleFV){
 			ACLMessage cfp = new ACLMessage(ACLMessage.INFORM);
-			for (int i = 0; i < nodeAgents.length; ++i) {
-				cfp.addReceiver(nodeAgents[i]);
+			for (AID agent : nodeAgents) {
+				cfp.addReceiver(agent);
 			} 			
 			cfp.setContent(newRoleFV + "");
 			cfp.setConversationId("geo-role-fv");
