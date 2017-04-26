@@ -1,8 +1,8 @@
 package project.fitnessFunctions;
 
-public class GeolocationFitness extends Fitness{
+public class CampaignFitness extends Fitness implements Comparable<CampaignFitness>{
 	
-	public GeolocationFitness(String agentName, float fitnessValue) {
+	public CampaignFitness(String agentName, float fitnessValue) {
 		super(agentName, fitnessValue);
 	}
 

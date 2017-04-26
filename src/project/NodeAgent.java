@@ -23,6 +23,7 @@ Boston, MA  02111-1307, USA.
 
 package project;
 
+import java.util.HashMap;
 import java.util.Iterator;
 import java.util.LinkedList;
 import java.util.Map;
@@ -41,6 +42,11 @@ import jade.domain.FIPAAgentManagement.DFAgentDescription;
 import jade.domain.FIPAAgentManagement.ServiceDescription;
 import jade.lang.acl.ACLMessage;
 import jade.lang.acl.MessageTemplate;
+import jade.wrapper.AgentController;
+import jade.wrapper.ContainerController;
+import jade.wrapper.StaleProxyException;
+import project.fitnessFunctions.CampaignFitness;
+import project.fitnessFunctions.Fitness;
 import project.fitnessFunctions.GeolocationFitness;
 import project.setup.RandomContexGenerator;
 
@@ -56,11 +62,14 @@ public class NodeAgent extends Agent {
 		
 	public final static float MIN_BATTERY_LVL = 0.3F;
 	public final static float MIN_ACCURACY_LVL = 0;
-	private static final String GEO_ROLE_FV = "GEO_ROLE_FV";
-	public final static int GEO_ROLE_K = 2;
+	private static final String GEO_ROLE = "GEO_ROLE";
+	private GPSBehavior gpsBehavior = new GPSBehavior(this, 10 * 1000);
 	
-	private Map<String, Set<GeolocationFitness>> fitnessTable = new ConcurrentHashMap<String, Set<GeolocationFitness>>();
+	private static final String CAMPAIGN_ROLE = "CAMPAIGN_ROLE";
+	
+	private Map<String, Set<Fitness>> fitnessTable = new ConcurrentHashMap<String, Set<Fitness>>();
 	private Map<String, LinkedList<String>> assignmentTable = new ConcurrentHashMap<String, LinkedList<String>>();
+	private Map<String, Integer> cardinalityTable = new HashMap<String, Integer>(); 
 	private boolean updatedFitnessValues = false;
 	
 	private float batteryLevel = RandomContexGenerator.batteryLevel(MIN_BATTERY_LVL);
@@ -90,15 +99,20 @@ public class NodeAgent extends Agent {
 	}
 	
 	private void setupFitnessTable() {
-		assignmentTable.put(GEO_ROLE_FV, new LinkedList<>());
+		
+		cardinalityTable.put(GEO_ROLE, 2);
+		
+		assignmentTable.put(GEO_ROLE, new LinkedList<>());
+		assignmentTable.put(CAMPAIGN_ROLE, new LinkedList<>());
 				
 		float geoRoleFV = GeolocationFitness.fitnessValue(
 			batteryLevel, 
 			RandomContexGenerator.sensorAccuracyLevel(MIN_ACCURACY_LVL)
 		);		
-		Set<GeolocationFitness> fitnessValues = new TreeSet<GeolocationFitness>();
+		Set<Fitness> fitnessValues = new TreeSet<Fitness>();
 		fitnessValues.add(new GeolocationFitness(getAID().getName(), geoRoleFV));
-		fitnessTable.put(GEO_ROLE_FV, fitnessValues);		
+		fitnessTable.put(GEO_ROLE, fitnessValues);
+		
 		System.out.println(geoRoleFV);
 	}
 	
@@ -118,10 +132,12 @@ public class NodeAgent extends Agent {
 	}
 	
 	protected void assumeRole(String role, int p){		
+		addBehaviour(gpsBehavior);
 		System.out.println("Node-agent "+getAID().getName()+" assumed role " + role);
 	}
 	
 	protected void dropRole(String role){
+		removeBehaviour(gpsBehavior);
 		System.out.println("Node-agent "+getAID().getName()+" droped role " + role);
 	}
 	
@@ -134,10 +150,21 @@ public class NodeAgent extends Agent {
 	}
 	
 	private float getFitnessValue(String agentName, String roleName) {
-		for(GeolocationFitness geolocationFitness : fitnessTable.get(roleName))
+		for(Fitness geolocationFitness : fitnessTable.get(roleName))
 			if(geolocationFitness.getAgentName().equals(agentName))
 				return geolocationFitness.getFitnessValue();
 		return 0;//TODO
+	}
+	
+	private void createCampaignAgent(){
+		ContainerController cc = getContainerController();
+		AgentController ac;
+		try {
+			ac = cc.createNewAgent("CampaignAgent", "project.CampaignAgent",null);
+			ac.start();
+		} catch (StaleProxyException e) {
+			e.printStackTrace();
+		}
 	}
 	
 	private class GPSBehavior extends TickerBehaviour {
@@ -187,11 +214,17 @@ public class NodeAgent extends Agent {
 				if(msg.getContent() != null){
 					String senderName = msg.getSender().getName();
 					float fitnessValue = Float.parseFloat(msg.getContent());
-					GeolocationFitness geolocationFitness = new GeolocationFitness(senderName, fitnessValue);
-					fitnessTable.get(GEO_ROLE_FV).remove(geolocationFitness);
-					fitnessTable.get(GEO_ROLE_FV).add(geolocationFitness);
+					if(msg.getConversationId().equals("geo-role-fv")){
+						CampaignFitness campaignFitness = new CampaignFitness(senderName, fitnessValue);
+						fitnessTable.get(CAMPAIGN_ROLE).remove(campaignFitness);
+						fitnessTable.get(CAMPAIGN_ROLE).add(campaignFitness);
+						System.out.println("Updated the fitness for the role " + CAMPAIGN_ROLE + " for agent " + senderName);
+					}else if(msg.getConversationId().equals("geo-role-fv")){						
+						GeolocationFitness geolocationFitness = new GeolocationFitness(senderName, fitnessValue);
+						fitnessTable.get(GEO_ROLE).remove(geolocationFitness);
+						fitnessTable.get(GEO_ROLE).add(geolocationFitness);
+					}
 					updatedFitnessValues = true;
-					//System.out.println(getAID().getName() + ": Fitness value for agent " + senderName + " updated with value " + fitnessValue);
 				}
 			}
 			else {
@@ -214,9 +247,9 @@ public class NodeAgent extends Agent {
 				boolean assume = false;
 				for(String roleName : fitnessTable.keySet()){	
 					assignmentTable.get(roleName).clear();
-					Iterator <GeolocationFitness> it = fitnessTable.get(roleName).iterator();
-					for(int i = 0; it.hasNext() && i < GEO_ROLE_K; i++){
-						GeolocationFitness geolocationFitness = it.next();
+					Iterator <Fitness> it = fitnessTable.get(roleName).iterator();
+					for(int i = 0; it.hasNext() && i < cardinalityTable.get(GEO_ROLE); i++){
+						Fitness geolocationFitness = it.next();
 						assignmentTable.get(roleName).add(i, geolocationFitness.getAgentName());	
 						if(geolocationFitness.getAgentName().equals(getAID().getName())){
 							assume = true;
@@ -238,17 +271,41 @@ public class NodeAgent extends Agent {
 		}
 		
 		public void onTick() {
+			checkCampaignFitness();
+			checkGPSFitness();
+		}
+		
+		private void checkCampaignFitness(){
+			float fv = batteryLevel;			
+			float oldRoleFV = getFitnessValue(getAID().getName(), CAMPAIGN_ROLE);
+			if(fv != oldRoleFV)				
+				informCampaignFitness(getAgent(), fv);	
+		}
+		
+		private void informCampaignFitness(Agent myAgent, float newRoleFV){
+			ACLMessage cfp = new ACLMessage(ACLMessage.INFORM);
+			for (AID agent : nodeAgents) {
+				cfp.addReceiver(agent);
+			} 			
+			cfp.setContent(newRoleFV + "");
+			cfp.setConversationId("campaign-role-fv");
+			cfp.setReplyWith("cfp"+System.currentTimeMillis()); // Unique value
+			myAgent.send(cfp);	
+			System.out.println(getAID().getName() + ": Campaign fitness value informed with value " + newRoleFV);
+		}
+		
+		private void checkGPSFitness(){
 			float geoRoleFV = GeolocationFitness.fitnessValue(
 				batteryLevel, 
 				RandomContexGenerator.sensorAccuracyLevel(MIN_ACCURACY_LVL)
 			);			
 			float oldRoleFV = 0;
-			oldRoleFV = getFitnessValue(getAID().getName(), GEO_ROLE_FV);
+			oldRoleFV = getFitnessValue(getAID().getName(), GEO_ROLE);
 			if(geoRoleFV != oldRoleFV)				
-				informFitness(getAgent(), geoRoleFV);			
+				informGPSFitness(getAgent(), geoRoleFV);	
 		}
 		
-		private void informFitness(Agent myAgent, float newRoleFV){
+		private void informGPSFitness(Agent myAgent, float newRoleFV){
 			ACLMessage cfp = new ACLMessage(ACLMessage.INFORM);
 			for (AID agent : nodeAgents) {
 				cfp.addReceiver(agent);
@@ -257,7 +314,7 @@ public class NodeAgent extends Agent {
 			cfp.setConversationId("geo-role-fv");
 			cfp.setReplyWith("cfp"+System.currentTimeMillis()); // Unique value
 			myAgent.send(cfp);	
-			System.out.println(getAID().getName() + ": Fitness value informed with value " + newRoleFV);
+			System.out.println(getAID().getName() + ": Geolocation Fitness value informed with value " + newRoleFV);
 		}
 	}
 }
